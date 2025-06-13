@@ -1,6 +1,6 @@
 [
     {
-      "origin": ["http://localhost:3005", "https://dex.oracleswap.io"],
+      "origin": ["http://localhost:3005", "https://owlswap.io"],
       "method": ["GET", "POST", "PUT", "DELETE", "HEAD"],
       "maxAgeSeconds": 3600,
       "responseHeader": ["Content-Type"]
