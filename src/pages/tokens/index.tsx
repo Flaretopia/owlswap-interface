@@ -6,7 +6,7 @@ import { i18n } from '@lingui/core'
 import { t } from '@lingui/macro'
 import { ExternalLinkIcon, GlobeIcon, InformationCircleIcon } from '@heroicons/react/solid'
 import { db } from '../../config/firebase'
-import { collection, getDocs, query, orderBy } from 'firebase/firestore'
+import { collection, getDocs, query, orderBy, where } from 'firebase/firestore'
 import { formatDistanceToNow } from 'date-fns'
 import classNames from 'classnames'
 import { useActiveWeb3React } from 'app/services/web3'
@@ -98,8 +98,14 @@ const fetchSGBPrice = async (): Promise<number> => {
 // Update the calculateTokenPrice function
 const calculateTokenPrice = async (lpAddress: string, tokenAddress: string, library: any) => {
   try {
-    const pair = new Contract(lpAddress, PAIR_ABI, library)
-    const token = new Contract(tokenAddress, ERC20_ABI, library)
+    if (!library) return null
+    
+    // Create a simple provider without ENS support
+    const provider = library.getSigner ? library.getSigner().provider : library
+    if (!provider) return null
+    
+    const pair = new Contract(lpAddress, PAIR_ABI, provider)
+    const token = new Contract(tokenAddress, ERC20_ABI, provider)
 
     // Get token decimals
     const tokenDecimals = await token.decimals()
@@ -140,9 +146,13 @@ const calculateTokenPrice = async (lpAddress: string, tokenAddress: string, libr
 // Update the calculateMarketCap function
 const calculateMarketCap = async (tokenAddress: string, price: number | null, library: any) => {
   try {
-    if (!price) return null
+    if (!price || !library) return null
 
-    const token = new Contract(tokenAddress, ERC20_ABI, library)
+    // Create a simple provider without ENS support
+    const provider = library.getSigner ? library.getSigner().provider : library
+    if (!provider) return null
+    
+    const token = new Contract(tokenAddress, ERC20_ABI, provider)
     const decimals = await token.decimals()
     const totalSupply = await token.totalSupply()
 
@@ -499,39 +509,82 @@ export default function Tokens() {
       try {
         setLoading(true)
 
-        // Fetch tokens from Firestore first
-        const tokensQuery = query(collection(db, 'tokens'), orderBy('createdAt', 'desc'))
-        const snapshot = await getDocs(tokensQuery)
-        let tokensList = snapshot.docs.map(doc => {
-          const data = doc.data()
-          return {
-            name: data.name || '',
-            symbol: data.symbol || '',
-            tokenAddress: data.tokenAddress || '',
-            lpAddress: data.lpAddress || '',
-            description: data.description || '',
-            website: data.website || '',
-            logoUrl: data.logoUrl || '/images/tokens/unknown.png',
-            launchDate: data.launchDate?.toDate() || new Date(),
-            lpAllocation: data.lpAllocation || '0',
-            devAllocation: data.devAllocation || '0',
-            initialLiquidity: data.initialLiquidity || '0',
-            chainId: data.chainId || '19',
-            totalSupply: data.totalSupply || '0',
-            creatorAddress: data.creatorAddress || '',
-            createdAt: data.createdAt?.toDate() || new Date(),
-            price: null,
-            marketCap: null,
-            holders: 0
-          } as TokenData
-        })
+        // Fetch tokens from Firestore first - try both string and number chainId
+        let snapshot;
+        try {
+          // First try with string chainId
+          const tokensQuery = query(
+            collection(db, 'tokens'), 
+            where('chainId', '==', '19'),
+            orderBy('createdAt', 'desc')
+          )
+          snapshot = await getDocs(tokensQuery)
+          
+          // If no results, try with number chainId
+          if (snapshot.empty) {
+            const tokensQueryNum = query(
+              collection(db, 'tokens'), 
+              where('chainId', '==', 19),
+              orderBy('createdAt', 'desc')
+            )
+            snapshot = await getDocs(tokensQueryNum)
+          }
+          
+          // If still no results, get all tokens and filter manually
+          if (snapshot.empty) {
+            console.log('No tokens found with chainId filter, fetching all tokens...')
+            const allTokensQuery = query(collection(db, 'tokens'), orderBy('createdAt', 'desc'))
+            snapshot = await getDocs(allTokensQuery)
+          }
+        } catch (error) {
+          console.error('Error with filtered query, falling back to all tokens:', error)
+          // Fallback to getting all tokens
+          const allTokensQuery = query(collection(db, 'tokens'), orderBy('createdAt', 'desc'))
+          snapshot = await getDocs(allTokensQuery)
+        }
+        let tokensList = snapshot.docs
+          .map(doc => {
+            const data = doc.data()
+            return {
+              name: data.name || '',
+              symbol: data.symbol || '',
+              tokenAddress: data.tokenAddress || '',
+              lpAddress: data.lpAddress || '',
+              description: data.description || '',
+              website: data.website || '',
+              logoUrl: data.logoUrl || '/images/tokens/unknown.png',
+              launchDate: data.launchDate?.toDate() || new Date(),
+              lpAllocation: data.lpAllocation || '0',
+              devAllocation: data.devAllocation || '0',
+              initialLiquidity: data.initialLiquidity || '0',
+              chainId: data.chainId || '19',
+              totalSupply: data.totalSupply || '0',
+              creatorAddress: data.creatorAddress || '',
+              createdAt: data.createdAt?.toDate() || new Date(),
+              price: null,
+              marketCap: null,
+              holders: 0
+            } as TokenData
+          })
+          .filter(token => {
+            // Filter for chainId 19 (Songbird) - handle both string and number
+            const chainId = token.chainId
+            return chainId === '19' || chainId === '0x13' || Number(chainId) === 19
+          })
+
+        console.log('Total documents fetched:', snapshot.docs.length)
+        console.log('Tokens after chainId filtering:', tokensList.length)
+        console.log('Sample token chainIds:', snapshot.docs.slice(0, 3).map(doc => ({ 
+          chainId: doc.data().chainId, 
+          symbol: doc.data().symbol 
+        })))
 
         // Show tokens immediately
         setLoading(false)
         setTokens(tokensList)
 
         // Then fetch additional data in the background
-        if (library) {
+        if (library && library.provider) {
           console.log('Starting to fetch additional data for tokens...')
 
           for (const token of tokensList) {
